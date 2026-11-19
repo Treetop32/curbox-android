@@ -199,8 +199,47 @@ class DataStoreManager(private val context: Context) {
         updateGated(GatedSettingsField.APP_GROUPS) { newGroups }
     }
 
+    // Skips the settings change delay on purpose: it only adds apps, which is stricter.
+    suspend fun addNewlyInstalledApps(installedApps: Map<String, Long>, checkedAtMs: Long): Boolean =
+        withContext(Dispatchers.Default) {
+            var addedAny = false
+            fun patch(groups: List<AppGroup>): List<AppGroup> = groups.map { group ->
+                if (!group.autoAddNewApps) return@map group
+                val existing = group.selectedPackages.toHashSet()
+                val additions = installedApps
+                    .filter { (pkg, installedAt) -> installedAt > group.autoAddCheckedUntilMs && pkg !in existing }
+                    .keys.sorted()
+                if (additions.isNotEmpty()) addedAny = true
+                group.copy(
+                    selectedPackages = group.selectedPackages + additions,
+                    autoAddCheckedUntilMs = maxOf(group.autoAddCheckedUntilMs, checkedAtMs)
+                )
+            }
+            settingsDataStore.updateData { current ->
+                addedAny = false
+                val delayConfig = current.settingsChangeDelayConfig2
+                val pendingChanges = delayConfig.pendingChanges.map { change ->
+                    if (change.field != GatedSettingsField.APP_GROUPS.name) return@map change
+                    val pendingGroups = runCatching {
+                        gson.fromJson<List<AppGroup>>(change.newValueJson, object : TypeToken<List<AppGroup>>() {}.type)
+                    }.getOrNull() ?: return@map change
+                    change.copy(newValueJson = gson.toJson(patch(pendingGroups)))
+                }
+                current.copy(
+                    blockedAppGroups = patch(current.blockedAppGroups),
+                    settingsChangeDelayConfig2 = delayConfig.copy(pendingChanges = pendingChanges)
+                )
+            }
+            addedAny
+        }
+
     suspend fun updateManualFocusGroups(newGroup: List<ManualFocusGroup>){
         settingsDataStore.updateData { it.copy(manualFocusGroups = newGroup) }
+    }
+
+    /** Edits the focus groups in one atomic step, so a racing session change is never lost. */
+    suspend fun editManualFocusGroups(transform: (Settings) -> List<ManualFocusGroup>) {
+        settingsDataStore.updateData { it.copy(manualFocusGroups = transform(it)) }
     }
 
     /**
@@ -243,6 +282,7 @@ class DataStoreManager(private val context: Context) {
                 else remote.antiUninstallConfig2.copy(
                     unlockRequestedAtMs = current.antiUninstallConfig2.unlockRequestedAtMs
                 ),
+                sipStretchBreakEndsAtMs = current.sipStretchBreakEndsAtMs,
                 serviceProtectionConfig = remote.serviceProtectionConfig.copy(
                     appBlockerLastAliveMs = current.serviceProtectionConfig.appBlockerLastAliveMs
                 ),
@@ -263,6 +303,8 @@ class DataStoreManager(private val context: Context) {
                 isAppUsageTrackingEnabled = current.isAppUsageTrackingEnabled,
                 isWebsiteUsageTrackingEnabled = current.isWebsiteUsageTrackingEnabled,
                 mindfulMessageConfig = current.mindfulMessageConfig,
+                sipStretchConfig = current.sipStretchConfig,
+                scheduledNotificationsConfig = current.scheduledNotificationsConfig,
                 uiHiderConfig = current.uiHiderConfig,
                 nextWebsiteRecheckTime = current.nextWebsiteRecheckTime,
                 externalUnlockConditions = current.externalUnlockConditions,
@@ -419,6 +461,22 @@ class DataStoreManager(private val context: Context) {
 
     suspend fun updateMindfulMessageConfig(config: neth.iecal.curbox.data.models.MindfulMessageConfig) {
         updateGated(GatedSettingsField.MINDFUL_MESSAGES) { config }
+    }
+
+    suspend fun updateSipStretchConfig(config: neth.iecal.curbox.data.models.SipStretchConfig) {
+        updateGated(GatedSettingsField.SIP_STRETCH) { config }
+    }
+
+    suspend fun updateScheduledNotificationsConfig(config: neth.iecal.curbox.data.models.ScheduledNotificationsConfig) {
+        updateGated(GatedSettingsField.SCHEDULED_NOTIFICATIONS) { config }
+    }
+
+    suspend fun updateSipStretchBreakEndsAt(endsAtMs: Long) {
+        settingsDataStore.updateData { it.copy(sipStretchBreakEndsAtMs = endsAtMs) }
+    }
+
+    suspend fun updateUrgeSurfConfig(config: neth.iecal.curbox.data.models.UrgeSurfConfig) {
+        settingsDataStore.updateData { it.copy(urgeSurfConfig = config) }
     }
 
     suspend fun updateUiHiderConfig(transform: (neth.iecal.curbox.data.models.UiHiderConfig) -> neth.iecal.curbox.data.models.UiHiderConfig) {
@@ -726,6 +784,12 @@ class DataStoreManager(private val context: Context) {
                 GatedSettingsField.MINDFUL_MESSAGES -> settings.copy(
                     mindfulMessageConfig = gson.fromJson(valueJson, neth.iecal.curbox.data.models.MindfulMessageConfig::class.java)
                 )
+                GatedSettingsField.SIP_STRETCH -> settings.copy(
+                    sipStretchConfig = gson.fromJson(valueJson, neth.iecal.curbox.data.models.SipStretchConfig::class.java)
+                )
+                GatedSettingsField.SCHEDULED_NOTIFICATIONS -> settings.copy(
+                    scheduledNotificationsConfig = gson.fromJson(valueJson, neth.iecal.curbox.data.models.ScheduledNotificationsConfig::class.java)
+                )
                 GatedSettingsField.UI_HIDER -> settings.copy(
                     uiHiderConfig = gson.fromJson(valueJson, neth.iecal.curbox.data.models.UiHiderConfig::class.java)
                 )
@@ -757,6 +821,8 @@ class DataStoreManager(private val context: Context) {
                 GatedSettingsField.REEL_COUNTER -> settings.isReelCounterOn
                 GatedSettingsField.GRAYSCALE_GROUPS -> settings.grayscaleGroups
                 GatedSettingsField.MINDFUL_MESSAGES -> settings.mindfulMessageConfig
+                GatedSettingsField.SIP_STRETCH -> settings.sipStretchConfig
+                GatedSettingsField.SCHEDULED_NOTIFICATIONS -> settings.scheduledNotificationsConfig
                 GatedSettingsField.UI_HIDER -> settings.uiHiderConfig
                 GatedSettingsField.APP_USAGE_TRACKING -> settings.isAppUsageTrackingEnabled
                 GatedSettingsField.WEBSITE_USAGE_TRACKING -> settings.isWebsiteUsageTrackingEnabled

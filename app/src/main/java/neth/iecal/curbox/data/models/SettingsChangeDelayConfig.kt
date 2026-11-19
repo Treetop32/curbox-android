@@ -16,7 +16,9 @@ enum class GatedSettingsField {
     UI_HIDER,
     APP_USAGE_TRACKING,
     WEBSITE_USAGE_TRACKING,
-    CHANGE_DELAY
+    CHANGE_DELAY,
+    SIP_STRETCH,
+    SCHEDULED_NOTIFICATIONS
 }
 
 /**
